@@ -20,6 +20,7 @@ class RolloutStorage:
             self.rewards = None
             self.dones = None
             self.values = None
+            self.values2 = None
             self.actions_log_prob = None
             self.action_mean = None
             self.action_sigma = None
@@ -61,6 +62,7 @@ class RolloutStorage:
         # for reinforcement learning
         if training_type == "rl":
             self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.values2 = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
             self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
@@ -124,7 +126,8 @@ class RolloutStorage:
     def clear(self):
         self.step = 0
 
-    def compute_returns(self, last_values, gamma, lam, normalize_advantage: bool = True):
+    def compute_returns(self, last_values, last_values2, gamma, lam, normalize_advantage: bool = True):
+        #lastvalues2の処理　どうすればいいかわからない。
         advantage = 0
         for step in reversed(range(self.num_transitions_per_env)):
             # if we are at the last step, bootstrap the return value

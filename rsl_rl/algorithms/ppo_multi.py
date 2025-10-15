@@ -132,6 +132,7 @@ class PPO_MULTI:
         # compute the actions and values
         self.transition.actions = self.policy.act(obs).detach()
         self.transition.values = self.policy.evaluate(obs).detach()
+        self.transition.values2 = self.policy.evaluate2(obs).detach()
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
         self.transition.action_sigma = self.policy.action_std.detach()
@@ -171,8 +172,9 @@ class PPO_MULTI:
     def compute_returns(self, obs):
         # compute value for the last step
         last_values = self.policy.evaluate(obs).detach()
+        last_values2 = self.policy.evaluate2(obs).detach()
         self.storage.compute_returns(
-            last_values, self.gamma, self.lam, normalize_advantage=not self.normalize_advantage_per_mini_batch
+            last_values, last_values2, self.gamma, self.lam, normalize_advantage=not self.normalize_advantage_per_mini_batch
         )
 
     def update(self):  # noqa: C901
@@ -250,6 +252,9 @@ class PPO_MULTI:
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             # -- critic
             value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+            # -- critic2
+            value_batch2 = self.policy.evaluate2(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
+            # value_batch2の処理を加える↓（Value function lossの辺り）
             # -- entropy
             # we only keep the entropy of the first augmentation (the original one)
             mu_batch = self.policy.action_mean[:original_batch_size]

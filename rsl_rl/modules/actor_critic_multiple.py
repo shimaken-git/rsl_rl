@@ -121,15 +121,15 @@ class ActorCriticMultiple(nn.Module):
 
     @property
     def action_mean(self):
-        return self.distribution.mean
+        return self.distribution.mean #平均
 
     @property
     def action_std(self):
-        return self.distribution.stddev
+        return self.distribution.stddev #標準偏差
 
     @property
     def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
+        return self.distribution.entropy().sum(dim=-1) #エントロピー
 
     def update_distribution(self, obs):
         if self.state_dependent_std:
@@ -153,13 +153,13 @@ class ActorCriticMultiple(nn.Module):
             else:
                 raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         # create distribution
-        self.distribution = Normal(mean, std)
+        self.distribution = Normal(mean, std)  #正規分布を作成
 
     def act(self, obs, **kwargs):
         obs = self.get_actor_obs(obs)
         obs = self.actor_obs_normalizer(obs)
         self.update_distribution(obs)
-        return self.distribution.sample()
+        return self.distribution.sample() #サンプルバッチ
 
     def act_inference(self, obs):
         obs = self.get_actor_obs(obs)
