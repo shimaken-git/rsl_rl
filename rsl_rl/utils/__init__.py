@@ -6,3 +6,4 @@
 """Helper functions."""
 
 from .utils import *
+from .barrier import relaxed_barrier_for_interval, relaxed_log_barrier_one_sided

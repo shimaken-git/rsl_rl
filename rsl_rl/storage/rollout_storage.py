@@ -18,6 +18,7 @@ class RolloutStorage:
             self.actions = None
             self.privileged_actions = None
             self.rewards = None
+            self.barrier_rewards = None
             self.dones = None
             self.values = None
             self.values2 = None
@@ -52,6 +53,7 @@ class RolloutStorage:
             device=self.device,
         )
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        self.barrier_rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
@@ -67,7 +69,9 @@ class RolloutStorage:
             self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
             self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
             self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.returns2 = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+            self.advantages2 = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
 
         # For RNN networks
         self.saved_hidden_states_a = None
@@ -85,6 +89,7 @@ class RolloutStorage:
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
+        self.barrier_rewards[self.step].copy_(transition.barrier_rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
 
         # for distillation
@@ -129,27 +134,35 @@ class RolloutStorage:
     def compute_returns(self, last_values, last_values2, gamma, lam, normalize_advantage: bool = True):
         #lastvalues2の処理　どうすればいいかわからない。
         advantage = 0
+        advantage2 = 0
         for step in reversed(range(self.num_transitions_per_env)):
             # if we are at the last step, bootstrap the return value
             if step == self.num_transitions_per_env - 1:
                 next_values = last_values
+                next_values2 = last_values2
             else:
                 next_values = self.values[step + 1]
+                next_values2 = self.values2[step + 1]
             # 1 if we are not in a terminal state, 0 otherwise
             next_is_not_terminal = 1.0 - self.dones[step].float()
             # TD error: r_t + gamma * V(s_{t+1}) - V(s_t)
             delta = self.rewards[step] + next_is_not_terminal * gamma * next_values - self.values[step]
+            delta2 = self.barrier_rewards[step] + next_is_not_terminal * gamma * next_values2 - self.values2[step]
             # Advantage: A(s_t, a_t) = delta_t + gamma * lambda * A(s_{t+1}, a_{t+1})
             advantage = delta + next_is_not_terminal * gamma * lam * advantage
+            advantage2 = delta2 + next_is_not_terminal * gamma * lam * advantage2
             # Return: R_t = A(s_t, a_t) + V(s_t)
             self.returns[step] = advantage + self.values[step]
+            self.returns2[step] = advantage2 + self.values2[step]
 
         # Compute the advantages
         self.advantages = self.returns - self.values
+        self.advantages2 = self.returns2 - self.values2
         # Normalize the advantages if flag is set
         # This is to prevent double normalization (i.e. if per minibatch normalization is used)
         if normalize_advantage:
             self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
+            self.advantages2 = (self.advantages2 - self.advantages2.mean()) / (self.advantages2.std() + 1e-8)
 
     # for distillation
     def generator(self):
@@ -171,11 +184,14 @@ class RolloutStorage:
         observations = self.observations.flatten(0, 1)
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
+        values2 = self.values2.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
+        returns2 = self.returns2.flatten(0, 1)
 
         # For PPO
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
         advantages = self.advantages.flatten(0, 1)
+        advantages2 = self.advantages2.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
 
@@ -193,14 +209,17 @@ class RolloutStorage:
 
                 # -- For PPO
                 target_values_batch = values[batch_idx]
+                target_values_batch2 = values2[batch_idx]
                 returns_batch = returns[batch_idx]
+                returns_batch2 = returns2[batch_idx]
                 old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
                 advantages_batch = advantages[batch_idx]
+                advantages_batch2 = advantages2[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
 
                 # yield the mini-batch
-                yield obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
+                yield obs_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, target_values_batch2, advantages_batch2, returns_batch2, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,
                     None,
                 ), None
@@ -233,6 +252,7 @@ class RolloutStorage:
                 returns_batch = self.returns[:, start:stop]
                 advantages_batch = self.advantages[:, start:stop]
                 values_batch = self.values[:, start:stop]
+                values2_batch = self.values2[:, start:stop]
                 old_actions_log_prob_batch = self.actions_log_prob[:, start:stop]
 
                 # reshape to [num_envs, time, num layers, hidden dim] (original shape: [time, num_layers, num_envs, hidden_dim])

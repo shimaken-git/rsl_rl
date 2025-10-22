@@ -103,11 +103,11 @@ class OnPolicyRunner:
                     # Sample actions
                     actions = self.alg.act(obs)
                     # Step the environment
-                    obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
+                    obs, rewards, barrier_rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     # Move to device
-                    obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    obs, rewards, barrier_rewards, dones = (obs.to(self.device), rewards.to(self.device), barrier_rewards.to(self.device), dones.to(self.device))
                     # process the step
-                    self.alg.process_env_step(obs, rewards, dones, extras)
+                    self.alg.process_env_step(obs, rewards, barrier_rewards, dones, extras)
                     # Extract intrinsic rewards (only for logging)
                     intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
                     # book keeping
@@ -144,7 +144,7 @@ class OnPolicyRunner:
                 start = stop
 
                 # compute returns
-                self.alg.compute_returns(obs)
+                self.alg.compute_returns(obs)  # value を計算して、advantageを計算する
 
             # update policy
             loss_dict = self.alg.update()
@@ -414,8 +414,6 @@ class OnPolicyRunner:
                 self.policy_cfg["actor_obs_normalization"] = self.cfg["empirical_normalization"]
             if self.policy_cfg.get("critic_obs_normalization") is None:
                 self.policy_cfg["critic_obs_normalization"] = self.cfg["empirical_normalization"]
-            if self.policy_cfg.get("critic2_obs_normalization") is None:
-                self.policy_cfg["critic2_obs_normalization"] = self.cfg["empirical_normalization"]
 
         # initialize the actor-critic
         actor_critic_class = eval(self.policy_cfg.pop("class_name"))

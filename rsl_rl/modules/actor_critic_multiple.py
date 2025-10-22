@@ -22,7 +22,6 @@ class ActorCriticMultiple(nn.Module):
         num_actions,
         actor_obs_normalization=False,
         critic_obs_normalization=False,
-        critic2_obs_normalization=False,
         actor_hidden_dims=[256, 256, 256],
         critic_hidden_dims=[256, 256, 256],
         critic2_hidden_dims=[256, 256, 256],
@@ -49,10 +48,6 @@ class ActorCriticMultiple(nn.Module):
         for obs_group in obs_groups["critic"]:
             assert len(obs[obs_group].shape) == 2, "The ActorCriticMultiple module only supports 1D observations."
             num_critic_obs += obs[obs_group].shape[-1]
-        num_critic2_obs = 0
-        for obs_group in obs_groups["critic2"]:
-            assert len(obs[obs_group].shape) == 2, "The ActorCriticMultiple module only supports 1D observations."
-            num_critic2_obs += obs[obs_group].shape[-1]
 
         self.state_dependent_std = state_dependent_std
         # actor
@@ -79,13 +74,7 @@ class ActorCriticMultiple(nn.Module):
         print(f"Critic MLP: {self.critic}")
 
         # critic2
-        self.critic2 = MLP(num_critic2_obs, 1, critic2_hidden_dims, activation)
-        # critic2 observation normalization
-        self.critic2_obs_normalization = critic2_obs_normalization
-        if critic2_obs_normalization:
-            self.critic2_obs_normalizer = EmpiricalNormalization(num_critic2_obs)
-        else:
-            self.critic2_obs_normalizer = torch.nn.Identity()
+        self.critic2 = MLP(num_critic_obs, 1, critic2_hidden_dims, activation)
         print(f"Critic2 MLP: {self.critic2}")
 
         # Action noise
@@ -175,8 +164,8 @@ class ActorCriticMultiple(nn.Module):
         return self.critic(obs)
 
     def evaluate2(self, obs, **kwargs):
-        obs = self.get_critic2_obs(obs)
-        obs = self.critic2_obs_normalizer(obs)
+        obs = self.get_critic_obs(obs)
+        obs = self.critic_obs_normalizer(obs)
         return self.critic2(obs)
 
     def get_actor_obs(self, obs):
@@ -191,12 +180,6 @@ class ActorCriticMultiple(nn.Module):
             obs_list.append(obs[obs_group])
         return torch.cat(obs_list, dim=-1)
 
-    def get_critic2_obs(self, obs):
-        obs_list = []
-        for obs_group in self.obs_groups["critic2"]:
-            obs_list.append(obs[obs_group])
-        return torch.cat(obs_list, dim=-1)
-
     def get_actions_log_prob(self, actions):
         return self.distribution.log_prob(actions).sum(dim=-1)
 
@@ -207,9 +190,6 @@ class ActorCriticMultiple(nn.Module):
         if self.critic_obs_normalization:
             critic_obs = self.get_critic_obs(obs)
             self.critic_obs_normalizer.update(critic_obs)
-        if self.critic2_obs_normalization:
-            critic2_obs = self.get_critic2_obs(obs)
-            self.critic2_obs_normalizer.update(critic2_obs)
 
     def load_state_dict(self, state_dict, strict=True):
         """Load the parameters of the actor-critic model.

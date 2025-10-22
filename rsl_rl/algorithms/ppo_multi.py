@@ -14,6 +14,7 @@ from rsl_rl.modules import ActorCriticMultiple
 from rsl_rl.modules.rnd import RandomNetworkDistillation
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import string_to_callable
+# from rsl_rl.utils.barrier import relaxed_barrier_for_interval
 
 
 class PPO_MULTI:
@@ -140,7 +141,7 @@ class PPO_MULTI:
         self.transition.observations = obs
         return self.transition.actions
 
-    def process_env_step(self, obs, rewards, dones, extras):
+    def process_env_step(self, obs, rewards, barrier_rewards, dones, extras):
         # update the normalizers
         self.policy.update_normalization(obs)
         if self.rnd:
@@ -149,6 +150,7 @@ class PPO_MULTI:
         # Record the rewards and dones
         # Note: we clone here because later on we bootstrap the rewards based on timeouts
         self.transition.rewards = rewards.clone()
+        self.transition.barrier_rewards = barrier_rewards.clone()
         self.transition.dones = dones
 
         # Compute the intrinsic rewards and add to extrinsic rewards
@@ -163,6 +165,9 @@ class PPO_MULTI:
             self.transition.rewards += self.gamma * torch.squeeze(
                 self.transition.values * extras["time_outs"].unsqueeze(1).to(self.device), 1
             )
+            self.transition.barrier_rewards += self.gamma * torch.squeeze(
+                self.transition.values2 * extras["time_outs"].unsqueeze(1).to(self.device), 1
+            )
 
         # record the transition
         self.storage.add_transitions(self.transition)
@@ -175,7 +180,7 @@ class PPO_MULTI:
         last_values2 = self.policy.evaluate2(obs).detach()
         self.storage.compute_returns(
             last_values, last_values2, self.gamma, self.lam, normalize_advantage=not self.normalize_advantage_per_mini_batch
-        )
+        )  # advantage を計算する
 
     def update(self):  # noqa: C901
         mean_value_loss = 0
@@ -205,6 +210,9 @@ class PPO_MULTI:
             target_values_batch,
             advantages_batch,
             returns_batch,
+            target_values_batch2,
+            advantages_batch2,
+            returns_batch2,
             old_actions_log_prob_batch,
             old_mu_batch,
             old_sigma_batch,
@@ -244,6 +252,10 @@ class PPO_MULTI:
                 target_values_batch = target_values_batch.repeat(num_aug, 1)
                 advantages_batch = advantages_batch.repeat(num_aug, 1)
                 returns_batch = returns_batch.repeat(num_aug, 1)
+                # -- critic2
+                target_values_batch2 = target_values_batch2.repeat(num_aug, 1)
+                advantages_batch2 = advantages_batch2.repeat(num_aug, 1)
+                returns_batch2 = returns_batch2.repeat(num_aug, 1)
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: we need to do this because we updated the policy with the new parameters
@@ -316,8 +328,18 @@ class PPO_MULTI:
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
+            # Value function loss critic2
+            if self.use_clipped_value_loss:
+                value_clipped = target_values_batch2 + (value_batch2 - target_values_batch2).clamp(
+                    -self.clip_param, self.clip_param
+                )
+                value_losses = (value_batch2 - returns_batch2).pow(2)
+                value_losses_clipped = (value_clipped - returns_batch2).pow(2)
+                value_loss2 = torch.max(value_losses, value_losses_clipped).mean()
+            else:
+                value_loss2 = (returns_batch2 - value_batch2).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
+            loss = surrogate_loss + self.value_loss_coef * value_loss + self.value_loss_coef * value_loss2 - self.entropy_coef * entropy_batch.mean()
 
             # Symmetry loss
             if self.symmetry:
