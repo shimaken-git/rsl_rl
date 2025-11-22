@@ -99,6 +99,7 @@ class RolloutStorage:
         # for reinforcement learning
         if self.training_type == "rl":
             self.values[self.step].copy_(transition.values)
+            self.values2[self.step].copy_(transition.values2)
             self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
             self.mu[self.step].copy_(transition.action_mean)
             self.sigma[self.step].copy_(transition.action_sigma)
@@ -132,7 +133,6 @@ class RolloutStorage:
         self.step = 0
 
     def compute_returns(self, last_values, last_values2, gamma, lam, normalize_advantage: bool = True):
-        #lastvalues2の処理　どうすればいいかわからない。
         advantage = 0
         advantage2 = 0
         for step in reversed(range(self.num_transitions_per_env)):

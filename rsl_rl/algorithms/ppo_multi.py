@@ -32,6 +32,7 @@ class PPO_MULTI:
         gamma=0.99,
         lam=0.95,
         value_loss_coef=1.0,
+        value_loss_coef2=0.0,    #lossにvalue_loss2を加えるとうまくない。critic2は独立して学習すべきかも
         entropy_coef=0.01,
         learning_rate=0.001,
         max_grad_norm=1.0,
@@ -97,6 +98,9 @@ class PPO_MULTI:
         self.policy.to(self.device)
         # Create optimizer
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+        print("policy.parameters()")
+        for param in self.policy.parameters():
+            print(type(param), param.size())
         # Create rollout storage
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
@@ -106,6 +110,7 @@ class PPO_MULTI:
         self.num_learning_epochs = num_learning_epochs
         self.num_mini_batches = num_mini_batches
         self.value_loss_coef = value_loss_coef
+        self.value_loss_coef2 = value_loss_coef2
         self.entropy_coef = entropy_coef
         self.gamma = gamma
         self.lam = lam
@@ -183,8 +188,10 @@ class PPO_MULTI:
         )  # advantage を計算する
 
     def update(self):  # noqa: C901
-        mean_value_loss = 0
-        mean_surrogate_loss = 0
+        mean_value_loss1 = 0
+        mean_surrogate_loss1 = 0
+        mean_value_loss2 = 0
+        mean_surrogate_loss2 = 0
         mean_entropy = 0
         # -- RND loss
         if self.rnd:
@@ -231,6 +238,7 @@ class PPO_MULTI:
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
                     advantages_batch = (advantages_batch - advantages_batch.mean()) / (advantages_batch.std() + 1e-8)
+                    advantages_batch2 = (advantages_batch2 - advantages_batch2.mean()) / (advantages_batch2.std() + 1e-8)
 
             # Perform symmetric augmentation
             if self.symmetry and self.symmetry["use_data_augmentation"]:
@@ -266,7 +274,6 @@ class PPO_MULTI:
             value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
             # -- critic2
             value_batch2 = self.policy.evaluate2(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1])
-            # value_batch2の処理を加える↓（Value function lossの辺り）
             # -- entropy
             # we only keep the entropy of the first augmentation (the original one)
             mu_batch = self.policy.action_mean[:original_batch_size]
@@ -311,13 +318,25 @@ class PPO_MULTI:
                         param_group["lr"] = self.learning_rate
 
             # Surrogate loss
+            # multi critic
+            # advantage_mixture = (advantages_batch + advantages_batch2) / 2
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
             surrogate = -torch.squeeze(advantages_batch) * ratio
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            # surrogate = -torch.squeeze(advantage_mixture) * ratio
+            # surrogate_clipped = -torch.squeeze(advantage_mixture) * torch.clamp(
+            #     ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+            # )
+            surrogate_loss1 = torch.max(surrogate, surrogate_clipped).mean()
 
+            surrogate2 = -torch.squeeze(advantages_batch2) * ratio
+            surrogate_clipped2 = -torch.squeeze(advantages_batch2) * torch.clamp(
+                ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
+            )
+            surrogate_loss2 = torch.max(surrogate2, surrogate_clipped2).mean()
+            # surrogate_loss = surrogate_loss1 + surrogate_loss2
             # Value function loss
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
@@ -325,9 +344,9 @@ class PPO_MULTI:
                 )
                 value_losses = (value_batch - returns_batch).pow(2)
                 value_losses_clipped = (value_clipped - returns_batch).pow(2)
-                value_loss = torch.max(value_losses, value_losses_clipped).mean()
+                value_loss1 = torch.max(value_losses, value_losses_clipped).mean()
             else:
-                value_loss = (returns_batch - value_batch).pow(2).mean()
+                value_loss1 = (returns_batch - value_batch).pow(2).mean()
             # Value function loss critic2
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch2 + (value_batch2 - target_values_batch2).clamp(
@@ -339,7 +358,8 @@ class PPO_MULTI:
             else:
                 value_loss2 = (returns_batch2 - value_batch2).pow(2).mean()
 
-            loss = surrogate_loss + self.value_loss_coef * value_loss + self.value_loss_coef * value_loss2 - self.entropy_coef * entropy_batch.mean()
+            # value_loss = value_loss1 + value_loss2
+            loss = (surrogate_loss1 + surrogate_loss2) + self.value_loss_coef * value_loss1 + self.value_loss_coef2 * value_loss2 - self.entropy_coef * entropy_batch.mean()
 
             # Symmetry loss
             if self.symmetry:
@@ -411,8 +431,10 @@ class PPO_MULTI:
                 self.rnd_optimizer.step()
 
             # Store the losses
-            mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
+            mean_value_loss1 += value_loss1.item()
+            mean_value_loss2 += value_loss2.item()
+            mean_surrogate_loss1 += surrogate_loss1.item()
+            mean_surrogate_loss2 += surrogate_loss2.item()
             mean_entropy += entropy_batch.mean().item()
             # -- RND loss
             if mean_rnd_loss is not None:
@@ -423,8 +445,10 @@ class PPO_MULTI:
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
-        mean_value_loss /= num_updates
-        mean_surrogate_loss /= num_updates
+        mean_value_loss1 /= num_updates
+        mean_surrogate_loss1 /= num_updates
+        mean_value_loss2 /= num_updates
+        mean_surrogate_loss2 /= num_updates
         mean_entropy /= num_updates
         # -- For RND
         if mean_rnd_loss is not None:
@@ -437,8 +461,10 @@ class PPO_MULTI:
 
         # construct the loss dictionary
         loss_dict = {
-            "value_function": mean_value_loss,
-            "surrogate": mean_surrogate_loss,
+            "value_function1": mean_value_loss1,
+            "value_function2": mean_value_loss2,
+            "surrogate1": mean_surrogate_loss1,
+            "surrogate2": mean_surrogate_loss2,
             "entropy": mean_entropy,
         }
         if self.rnd:

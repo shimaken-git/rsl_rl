@@ -83,8 +83,10 @@ class OnPolicyRunner:
         # create buffers for logging extrinsic and intrinsic rewards
         if self.alg.rnd:
             erewbuffer = deque(maxlen=100)
+            brewbuffer = deque(maxlen=100)
             irewbuffer = deque(maxlen=100)
             cur_ereward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+            cur_breward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
             cur_ireward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         # Ensure all parameters are in-synced
@@ -116,11 +118,14 @@ class OnPolicyRunner:
                             ep_infos.append(extras["episode"])
                         elif "log" in extras:
                             ep_infos.append(extras["log"])
+                        if "barrier_episode" in extras:
+                            ep_infos.append(extras["barrier_episode"])
                         # Update rewards
                         if self.alg.rnd:
                             cur_ereward_sum += rewards
+                            cur_breward_sum += barrier_rewards
                             cur_ireward_sum += intrinsic_rewards  # type: ignore
-                            cur_reward_sum += rewards + intrinsic_rewards
+                            cur_reward_sum += rewards + barrier_rewards + intrinsic_rewards
                         else:
                             cur_reward_sum += rewards
                         # Update episode length
@@ -135,8 +140,10 @@ class OnPolicyRunner:
                         # -- intrinsic and extrinsic rewards
                         if self.alg.rnd:
                             erewbuffer.extend(cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                            brewbuffer.extend(cur_breward_sum[new_ids][:, 0].cpu().numpy().tolist())
                             irewbuffer.extend(cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
                             cur_ereward_sum[new_ids] = 0
+                            cur_breward_sum[new_ids] = 0
                             cur_ireward_sum[new_ids] = 0
 
                 stop = time.time()
@@ -186,25 +193,26 @@ class OnPolicyRunner:
         # -- Episode info
         ep_string = ""
         if locs["ep_infos"]:
-            for key in locs["ep_infos"][0]:
-                infotensor = torch.tensor([], device=self.device)
-                for ep_info in locs["ep_infos"]:
-                    # handle scalar and zero dimensional tensor infos
-                    if key not in ep_info:
-                        continue
-                    if not isinstance(ep_info[key], torch.Tensor):
-                        ep_info[key] = torch.Tensor([ep_info[key]])
-                    if len(ep_info[key].shape) == 0:
-                        ep_info[key] = ep_info[key].unsqueeze(0)
-                    infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
-                value = torch.mean(infotensor)
-                # log to logger and terminal
-                if "/" in key:
-                    self.writer.add_scalar(key, value, locs["it"])
-                    ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
-                else:
-                    self.writer.add_scalar("Episode/" + key, value, locs["it"])
-                    ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+            for ep in range(2):
+                for key in locs["ep_infos"][ep]:
+                    infotensor = torch.tensor([], device=self.device)
+                    for ep_info in locs["ep_infos"]:
+                        # handle scalar and zero dimensional tensor infos
+                        if key not in ep_info:
+                            continue
+                        if not isinstance(ep_info[key], torch.Tensor):
+                            ep_info[key] = torch.Tensor([ep_info[key]])
+                        if len(ep_info[key].shape) == 0:
+                            ep_info[key] = ep_info[key].unsqueeze(0)
+                        infotensor = torch.cat((infotensor, ep_info[key].to(self.device)))
+                    value = torch.mean(infotensor)
+                    # log to logger and terminal
+                    if "/" in key:
+                        self.writer.add_scalar(key, value, locs["it"])
+                        ep_string += f"""{f'{key}:':>{pad}} {value:.4f}\n"""
+                    else:
+                        self.writer.add_scalar("Episode/" + key, value, locs["it"])
+                        ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
 
         mean_std = self.alg.policy.action_std.mean()
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
@@ -227,6 +235,7 @@ class OnPolicyRunner:
             # separate logging for intrinsic and extrinsic rewards
             if hasattr(self.alg, "rnd") and self.alg.rnd:
                 self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(locs["erewbuffer"]), locs["it"])
+                self.writer.add_scalar("Rnd/mean_extrinsic_barrier_reward", statistics.mean(locs["brewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # everything else
@@ -255,6 +264,7 @@ class OnPolicyRunner:
             if hasattr(self.alg, "rnd") and self.alg.rnd:
                 log_string += (
                     f"""{'Mean extrinsic reward:':>{pad}} {statistics.mean(locs['erewbuffer']):.2f}\n"""
+                    f"""{'Mean extrinsic barrier reward:':>{pad}} {statistics.mean(locs['brewbuffer']):.2f}\n"""
                     f"""{'Mean intrinsic reward:':>{pad}} {statistics.mean(locs['irewbuffer']):.2f}\n"""
                 )
             log_string += f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
