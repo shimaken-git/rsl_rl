@@ -14,7 +14,6 @@ from rsl_rl.modules import ActorCriticMultiple
 from rsl_rl.modules.rnd import RandomNetworkDistillation
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import string_to_callable
-# from rsl_rl.utils.barrier import relaxed_barrier_for_interval
 
 
 class PPO_MULTI:
@@ -97,10 +96,8 @@ class PPO_MULTI:
         self.policy = policy
         self.policy.to(self.device)
         # Create optimizer
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
-        print("policy.parameters()")
-        for param in self.policy.parameters():
-            print(type(param), param.size())
+        self.optimizer = optim.Adam(list(self.policy.actor.parameters()) + list(self.policy.critic.parameters()), lr=learning_rate)
+        self.optimizer_critic2 = optim.Adam(self.policy.critic2.parameters(), lr=learning_rate * 0.5)
         # Create rollout storage
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
@@ -319,16 +316,11 @@ class PPO_MULTI:
 
             # Surrogate loss
             # multi critic
-            # advantage_mixture = (advantages_batch + advantages_batch2) / 2
             ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
             surrogate = -torch.squeeze(advantages_batch) * ratio
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            # surrogate = -torch.squeeze(advantage_mixture) * ratio
-            # surrogate_clipped = -torch.squeeze(advantage_mixture) * torch.clamp(
-            #     ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
-            # )
             surrogate_loss1 = torch.max(surrogate, surrogate_clipped).mean()
 
             surrogate2 = -torch.squeeze(advantages_batch2) * ratio
@@ -336,7 +328,6 @@ class PPO_MULTI:
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss2 = torch.max(surrogate2, surrogate_clipped2).mean()
-            # surrogate_loss = surrogate_loss1 + surrogate_loss2
             # Value function loss
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
@@ -348,18 +339,12 @@ class PPO_MULTI:
             else:
                 value_loss1 = (returns_batch - value_batch).pow(2).mean()
             # Value function loss critic2
-            if self.use_clipped_value_loss:
-                value_clipped = target_values_batch2 + (value_batch2 - target_values_batch2).clamp(
-                    -self.clip_param, self.clip_param
-                )
-                value_losses = (value_batch2 - returns_batch2).pow(2)
-                value_losses_clipped = (value_clipped - returns_batch2).pow(2)
-                value_loss2 = torch.max(value_losses, value_losses_clipped).mean()
-            else:
-                value_loss2 = (returns_batch2 - value_batch2).pow(2).mean()
+            with torch.no_grad():
+                target2 = returns_batch2.clone()
+            value2_pred = self.policy.evaluate2(obs_batch)
+            value_loss2 = (value2_pred - target2).pow(2).mean()
 
-            # value_loss = value_loss1 + value_loss2
-            loss = (surrogate_loss1 + surrogate_loss2) + self.value_loss_coef * value_loss1 + self.value_loss_coef2 * value_loss2 - self.entropy_coef * entropy_batch.mean()
+            loss = (surrogate_loss1 + surrogate_loss2) + self.value_loss_coef * value_loss1 - self.entropy_coef * entropy_batch.mean()
 
             # Symmetry loss
             if self.symmetry:
@@ -424,8 +409,13 @@ class PPO_MULTI:
 
             # Apply the gradients
             # -- For PPO
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            nn.utils.clip_grad_norm_(list(self.policy.actor.parameters()) + list(self.policy.critic.parameters()), self.max_grad_norm)
             self.optimizer.step()
+            #second critic
+            # self.optimizer_critic2.zero_grad()
+            # value_loss2.backward()
+            # nn.utils.clip_grad_norm_(self.policy.critic2.parameters(), self.max_grad_norm)
+            # self.optimizer_critic2.step()
             # -- For RND
             if self.rnd_optimizer:
                 self.rnd_optimizer.step()

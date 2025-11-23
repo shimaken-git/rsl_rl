@@ -11,7 +11,6 @@ from torch.distributions import Normal
 
 from rsl_rl.networks import MLP, EmpiricalNormalization
 
-
 class ActorCriticMultiple(nn.Module):
     is_recurrent = False
 
